@@ -1,0 +1,187 @@
+clear all
+cd('C:\Users\Jairo F Gudiño R\Desktop\Project2')
+FileName='Sovereign Bonds Ratings.xlsx';
+FileA='Bond Ratings';
+FileB='CDS-5Y';
+FileC='Regions';
+FileD='Classification Test';
+FileClass='Reclassification.xlsx';
+FileE='S&P';
+%% LECTURA DE INSUMOS %%
+
+windowlength=22;
+% Ratings de Bonos %
+% Countries={'Brazil','Colombia','Mexico','Peru','Venezuela'};
+Agencies={'S&P'};
+[~,~,Ratingsraw]=xlsread(FileName,FileA);
+Ratingsraw=Ratingsraw(ismember(Ratingsraw(:,1),Agencies'),:);
+Ratingsraw=Ratingsraw(:,[2 4 5]);
+% Dates %
+[Month,Others]=strtok(Ratingsraw(:,2));
+Months={'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'};
+for i=1:numel(Months)
+Month=strrep(Month,Months(i),num2str(i));
+end
+[Day,Year]=strtok(Others);
+for i=1:length(Day)
+DayS=Day{i,1};
+if ismember(DayS(1),char('0'))==1
+Day{i,1}=str2double(DayS(2));
+   else
+Day{i,1}=str2double(DayS);
+end
+end
+Month=cellfun(@str2num,Month,'UniformOutput',0);
+Year=cellfun(@str2num,Year,'UniformOutput',0);
+Dates=datetime(cell2mat(Year),cell2mat(Month),cell2mat(Day));
+Ratingsraw(:,2)=cellstr(datestr(cellstr(char(Dates)),'dd/mm/yyyy'));
+clear Dates Day Month Year DaysS Others
+
+% Series de Credit Default Swaps para Metodología KV y entrenamiento de algoritmos %
+[~,~,Curvesraw]=xlsread(FileName,FileB);
+CurveDates=((Curvesraw(2:end,1)));
+CurveDatesT=datetime(year(CurveDates,'dd/mm/yyyy'),month(CurveDates,'dd/mm/yyyy'),day(CurveDates,'dd/mm/yyyy'));
+CurveDates=cellstr(datestr(cellstr(char(CurveDatesT)),'dd/mm/yyyy'));
+% Series de Credit Default Swaps para clasificación %
+[~,~,Classraw]=xlsread(FileName,FileD);
+Classraw=Classraw(1:230,[1:4 6 7 9]);
+CurveCDates=((Classraw(2:end,1)));
+CurveCDatesT=datetime(year(CurveCDates,'dd/mm/yyyy'),month(CurveCDates,'dd/mm/yyyy'),day(CurveCDates,'dd/mm/yyyy'));
+CurveCDates=cellstr(datestr(cellstr(char(CurveCDatesT)),'dd/mm/yyyy'));
+ClassP=find(ismember(CurveDates,CurveCDates(windowlength:end,:)));
+%% CONSTRUCCIÓN DE HISTÓRICOS DE CDS 5Y PARA ENTRENAMIENTO %%
+CurvesNames=Curvesraw(1,2:end);
+Curvesraw=Curvesraw(2:end,2:end);
+for i=1:size(Curvesraw,2)
+lognan=cellfun(@(v) any(~isnumeric(v(:))),Curvesraw(:,i));
+Curvesraw(lognan,i)=num2cell(str2double('NaN'));
+end
+clear lognan
+Curvesraw=num2cell(CompleteValues(cell2mat(Curvesraw),'double'));
+%% CONSTRUCCIÓN DE HISTÓRICOS DE CDS 5Y PARA CLASIFICACIÓN %%
+Classraw=Classraw(2:end,2:end);
+for i=1:size(Classraw,2)
+lognan=cellfun(@(v) any(~isnumeric(v(:))),Classraw(:,i));
+Classraw(lognan,i)=num2cell(str2double('NaN'));
+end
+clear lognan
+Classraw=num2cell(CompleteValues(cell2mat(Classraw),'double'));
+ns=size(Classraw,2);
+%% CONSTRUCCIÓN DE HISTÓRICOS DE RATINGS DE BONOS SOBERANOS %%
+nc=length(CurvesNames);
+RatingsHistory=cell(length(CurveDates),nc);
+for i=1:nc
+RatingsrawF=Ratingsraw(ismember(Ratingsraw(:,end),CurvesNames(i)),:);
+[a,b]=ismember(CurveDates,RatingsrawF(:,2));
+DatesTable=sortrows([find(a),b(a)],2);
+RatingsHistory(DatesTable(:,1),i+1)=RatingsrawF(DatesTable(:,2),1);
+RatingsHistory(1,i+1)=RatingsrawF(size(DatesTable,1)+1,1);
+end
+clear DatesTable a b RatingsrawF
+RatingsHistory=CompleteValues(RatingsHistory(:,2:end),'cell');
+[~,~,Ratingsclass]=xlsread(FileClass,FileE);
+% Reconversión a categorías predefinidas por Marmi, Nassigh & Regoli (2014)
+Ratingorder={'AAA';'AA';'A';'BBB';'BB'};
+RnumHistory=cell(length(CurveDates),nc);
+for i=1:(nc)
+for j=2:size(Ratingsclass,1)
+logconv=ismember(RatingsHistory(:,i),char(Ratingsclass(j,1)));
+RatingsHistory(logconv,i)=cellstr(repmat(char(Ratingsclass(j,2)),sum(logconv),1));
+RnumHistory(logconv,i)=(repmat(Ratingsclass(j,3),sum(logconv),1));
+end
+end
+RnumHistory=cell2mat(RnumHistory);
+clear Ratingsclass logconv
+%% CREACIÓN DE VENTANAS MÓVILES: APLICACIÓN DE ALG. DE CLASIFICACIÓN Y APROX. KV APPROACH PARA DEF. DE LÍMITES %%
+
+windowlengthtotal=1:100;
+GapCondTesting=cell(length(windowlengthtotal),1);
+AccuracyTesting=cell(length(windowlengthtotal),1);
+PrecisionTesting=zeros(length(windowlengthtotal),length(Ratingorder));
+RecallTesting=zeros(length(windowlengthtotal),length(Ratingorder));
+
+Alg={'CT'};
+a=length(Alg);
+NGap=[-4,-3,-2,-1,0,1,2,3,4];
+lNGap=length(NGap);
+N={'1','2','3','4','5'};
+GapWindow=[30];
+p=length(GapWindow);
+Ratingorder=({'AAA';'AA';'A';'BBB';'BB'})';
+
+for x=1:numel(windowlengthtotal)
+    
+windowlength = windowlengthtotal(x)
+CTRatings=cell(length(CurveDates)-windowlength,nc);
+
+for i=(windowlength):length(CurveDates)
+
+CurvesrawF=Curvesraw(i-windowlength+1:i,:);
+RatingsF=RatingsHistory(i-windowlength+1:i,:);
+FinalRaw=cell(windowlength*nc,2);
+
+for c=1:nc
+if c==1
+FinalRaw(1:windowlength,:)=[RatingsF(:,1),CurvesrawF(:,1)];
+  else
+FinalRaw(((c-1)*windowlength)+1:c*windowlength,:)=[RatingsF(:,c),CurvesrawF(:,c)];
+end
+end
+clear RatingsF
+
+MdlCT = fitctree(cell2mat(FinalRaw(:,2)),(ordinal(FinalRaw(:,1)))');
+PredCT = predict(MdlCT,cell2mat(FinalRaw(:,2)));
+CTRatings(i-windowlength+1,:)=(cellstr(PredCT((windowlength:windowlength:(windowlength*nc))')))';
+end
+
+HistoricalN=double(categorical(RatingsHistory(windowlength:end,:),Ratingorder,N,'Ordinal',true));
+
+eval(['AlgN=double(categorical(',strcat(Alg{a},'Ratings'),',Ratingorder,N));'])
+RatingGap=zeros(lNGap,lNGap,size(AlgN,1)-GapWindow(p)+1);
+confusionMatT=zeros(length(N),length(N),size(AlgN,1)-GapWindow(p)+1);
+
+for t=GapWindow(p):size(AlgN,1)
+confusionMatT(:,:,t-GapWindow(p)+1)= confusionmat(AlgN(t-GapWindow(p)+1,:),HistoricalN(t,:));
+RatingGapM=AlgN(t-GapWindow(p)+1,:)-HistoricalN(t-GapWindow(p)+1,:);
+RatingGapO=HistoricalN(t,:)-HistoricalN(t-GapWindow(p)+1,:);
+for q=1:lNGap
+logcond=ismember(RatingGapM,NGap(q));
+RatingGap(q,:,t-GapWindow(p)+1)=histcounts(RatingGapO(logcond),NGap(1):NGap(end)+1);
+end
+end
+
+RatingContingency=sum(confusionMatT,3);
+AccuracyTesting{windowlengthtotal(x)} = sum(diag(RatingContingency))/(nc*(size(AlgN,1)-GapWindow(p)+1));
+PrecisionTesting(windowlengthtotal(x),:) = (diag(RatingContingency)./sum(RatingContingency,2))';
+RecallTesting(windowlengthtotal(x),:) = (diag(RatingContingency)./sum(RatingContingency,1)')';
+RatingGap=sum(RatingGap,3);
+RatingGap=[sum(RatingGap(:,NGap<0),2),sum(RatingGap(:,NGap==0),2),...
+    sum(RatingGap(:,NGap>0),2)];
+RatingGapPercentage = bsxfun(@rdivide,RatingGap,sum(RatingGap,2));
+RatingGapPercentage(isnan(RatingGapPercentage)) = 0;
+GapCondTesting{windowlengthtotal(x)}=RatingGapPercentage;
+
+end
+
+save GraphCondTesting
+save RecallTesting
+save AccuracyTesting
+save PrecisionTesting
+
+% Se puede observar que para distintas medidas de clasificación el
+% tamaño óptimo de la ventana es de 5 días.
+
+NegExtremePercent3=cell2mat(arrayfun(@(x) x{:,1}(8,3),GapCondTesting,'uni',0));
+NegExtremePercent4=cell2mat(arrayfun(@(x) x{:,1}(9,3),GapCondTesting,'uni',0));
+NegExtremePercent=[NegExtremePercent3,NegExtremePercent4];
+
+% No obstante, cuando se observan extremos parece verse que la
+% clasificación se centra en la predicción de ratings que no cambian de
+% calificación. A una ventana de 31 días se obtienen predicciones más
+% precisas de movimientos de 4 niveles: 
+
+bar(GapCondTesting{31,1},'stacked')
+
+% Para 31 días el poder predictivo no se reduce mucho.
+save NegExtremePercent
+%% Gráficas %%
